@@ -11,13 +11,15 @@ if [[ $# -ge 2 ]] ; then
 
     cd $DOCKER_DIR
 else
-    SCRIPT_DIR=$(cd $(dirname $0); pwd)
-    cd ${SCRIPT_DIR};
-
     SERVICE=$1
     if [[ -z $SERVICE ]] ; then
-        echo "ERROR: No service provided..."
-        exit 1
+        SERVICE_LIST=$(docker-compose config --services)
+        for service in $SERVICE_LIST 
+        do
+            SERVICE=$service
+            break
+        done
+        echo "No service provided, using \"$SERVICE\"."
     fi
 fi
 
