@@ -1,0 +1,18 @@
+version: '3'
+
+services:
+  docker-helper-example:
+    image: ubuntu:22.04
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${HOME}/.inputrc:/root/.inputrc
+      - ${HOME}/.vimrc:/root/.vimrc
+      - ${HOME}/.vim:/root/.vim
+      - ~/.Xauthority:/root/.Xauthority
+      - ../docker-scripts/setup-user.sh:/bin/setup-user.sh
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - UID=${UID:-0}
+      - GID=${GID:-0}
+      - USER=${USER:-root}
