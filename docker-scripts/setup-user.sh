@@ -13,6 +13,7 @@
 useradd -u ${UID} ${USER}
 groupmod -g ${GID} ${USER}
 usermod -a -G 0 ${USER}
+usermod -d /root ${USER}
 chmod g+rwx /root
 
 if [[ $# -ge 1 ]] ; then
