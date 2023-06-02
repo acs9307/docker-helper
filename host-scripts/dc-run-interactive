@@ -26,4 +26,4 @@ fi
 export UID=$(id -u)
 export GID=$(id -g)
 
-docker-compose run --rm --entrypoint "$CMD" $SERVICE
+docker compose run --rm --entrypoint "$CMD" $SERVICE
