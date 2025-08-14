@@ -7,7 +7,22 @@ from pathlib import Path
 from typing import Dict, Iterable, List
 
 import requests
+import ssl
 import yaml
+from subprocess import CalledProcessError
+import logging
+import sys
+from logging.handlers import RotatingFileHandler
+
+
+_LOGGER = None
+
+def log(msg: str) -> None:
+    global _LOGGER
+    if _LOGGER is None:
+        print(f"[MONITOR] {msg}")
+        return
+    _LOGGER.info(f"[MONITOR] {msg}")
 
 
 def detect_ports(compose_dir: str) -> List[int]:
@@ -46,15 +61,19 @@ def detect_ports(compose_dir: str) -> List[int]:
     return []
 
 
-def check_ports(ports: Iterable[int], status: Dict[int, bool]) -> None:
-    """Check ports and report when they change state."""
+def check_ports(ports: Iterable[int], status: Dict[int, bool], scheme_map: Dict[int, str]) -> None:
+    """Check ports over HTTP/HTTPS and report when they change state."""
     for port in ports:
-        url = f"http://localhost:{port}"
+        scheme = scheme_map.get(port, "http")
+        url = f"{scheme}://localhost:{port}"
         try:
-            response = requests.get(url, timeout=2)
+            if scheme == "https":
+                response = requests.get(url, timeout=2, verify=False)
+            else:
+                response = requests.get(url, timeout=2)
             if response.ok:
                 if status.get(port) is not True:
-                    print(f"Port {port} is up")
+                    print(f"Port {port} is up ({scheme.upper()})")
                 status[port] = True
             else:
                 if status.get(port) is not False:
@@ -64,6 +83,133 @@ def check_ports(ports: Iterable[int], status: Dict[int, bool]) -> None:
             if status.get(port) is not False:
                 print(f"Port {port} check failed: {exc}")
             status[port] = False
+
+
+def try_http_https(port: int, timeout: float = 2.0) -> str | None:
+    """Detect if a localhost port speaks HTTP or HTTPS.
+    Returns "http", "https", or None if neither responds successfully.
+    """
+    # Try HTTP
+    try:
+        r = requests.get(f"http://localhost:{port}", timeout=timeout)
+        if r.ok:
+            return "http"
+    except Exception:
+        pass
+    # Try HTTPS (skip cert verification for local/dev)
+    try:
+        r = requests.get(f"https://localhost:{port}", timeout=timeout, verify=False)
+        if r.ok:
+            return "https"
+    except Exception:
+        pass
+    return None
+
+
+def classify_ports_http(all_ports: List[int], user_ports: List[int], startup_probe_seconds: float = 30.0, interval: float = 1.5) -> tuple[List[int], Dict[int, str]]:
+    """After startup, probe ports to keep only HTTP(S) ports (unless user specified).
+    Returns (filtered_ports, scheme_map).
+    """
+    user_set = set(user_ports or [])
+    scheme_map: Dict[int, str] = {}
+
+    remaining = list(all_ports)
+    deadline = time.time() + startup_probe_seconds
+    # Probe loop allows services a little time to become ready
+    while remaining and time.time() < deadline:
+        next_round: List[int] = []
+        for p in remaining:
+            scheme = try_http_https(p)
+            if scheme:
+                scheme_map[p] = scheme
+            else:
+                next_round.append(p)
+        if not next_round:
+            break
+        time.sleep(interval)
+        remaining = next_round
+
+    # Build final port list: keep those that spoke HTTP(S) or were explicitly specified by user
+    filtered: List[int] = []
+    for p in all_ports:
+        if p in scheme_map or p in user_set:
+            filtered.append(p)
+        else:
+            print(f"Filtering out non-HTTP(S) port {p} from automatic polling (not user-specified)")
+    # Default any unknown scheme to http for user-specified ports
+    for p in filtered:
+        if p not in scheme_map:
+            scheme_map[p] = "http"
+    return filtered, scheme_map
+
+
+def build_health_url(ports: List[int], health: str) -> str | None:
+    """Build health check URL from ports and health path."""
+    if not ports:
+        return None
+    path = health if health.startswith("/") else f"/{health}"
+    scheme = "http"
+    if ports:
+        # Attempt to infer scheme from classification if available later; default to http here.
+        pass
+    return f"http://localhost:{ports[0]}{path}"
+
+
+def check_url(url: str) -> bool:
+    """Check a health URL for a successful response."""
+    try:
+        response = requests.get(url, timeout=2)
+        return response.ok
+    except Exception:
+        return False
+
+def perform_shutdown(compose_dir:str):
+    """
+        Shutsdown the docker services.
+    """
+    try:
+        subprocess.run(["docker", "compose", "restart"], cwd=compose_dir, check=True)
+    except CalledProcessError as exc:
+        print(f"Failed to shutdown docker services: {exc}")
+
+def perform_restart(mode: str, compose_dir: str, up_cmd: List[str], current_proc: subprocess.Popen | None) -> subprocess.Popen | None:
+    """Execute the requested restart behavior.
+    Returns a new Popen if a fresh `up` is started (down-up), otherwise None.
+    """
+    if mode == "none":
+        print("Restart mode is 'none'; skipping restart")
+        return None
+
+    if mode == "restart":
+        try:
+            subprocess.run(["docker", "compose", "restart"], cwd=compose_dir, check=True)
+        except CalledProcessError as exc:
+            print(f"Failed to restart docker compose: {exc}")
+        return None
+
+    if mode == "down-up":
+        # Stop the running `docker compose up` process if present
+        if current_proc and current_proc.poll() is None:
+            try:
+                current_proc.terminate()
+                current_proc.wait(timeout=10)
+            except Exception:
+                try:
+                    current_proc.kill()
+                except Exception:
+                    pass
+        
+        perform_shutdown(compose_dir=compose_dir)
+
+        # Start a fresh `up`
+        try:
+            new_proc = subprocess.Popen(up_cmd, cwd=compose_dir)
+            return new_proc
+        except Exception as exc:
+            print(f"Failed to start docker compose up: {exc}")
+            return None
+
+    return None
 
 
 def main() -> int:
@@ -84,30 +230,170 @@ def main() -> int:
         help="Ports to monitor. If omitted, ports are detected from compose file.",
     )
     parser.add_argument(
-        "-i", "--interval", type=float, default=5.0, help="Seconds between checks"
+        "-i", "--interval", type=float, default=10.0, help="Seconds between checks"
+    )
+    parser.add_argument(
+        "--startup-wait",
+        type=float,
+        default=30.0,
+        help="Seconds to wait after starting docker compose before the initial HTTP(S) port classification",
+    )
+    parser.add_argument(
+        "--health",
+        help="Health check path or URL",
+    )
+    parser.add_argument(
+        "--restart-mode",
+        choices=["restart", "down-up", "none"],
+        default="down-up",
+        help=(
+            "Action when service is unhealthy: 'restart' = docker compose restart; "
+            "'down-up' = docker compose down then up; 'none' = take no action."
+        ),
+    )
+    parser.add_argument(
+        "--restart-threshold",
+        type=int,
+        default=3,
+        help="Consecutive failed health checks before triggering a restart",
+    )
+    parser.add_argument(
+        "--restart-cooldown",
+        type=float,
+        default=30.0,
+        help="Seconds to wait before allowing another restart",
+    )
+    parser.add_argument(
+        "--log-file",
+        help="Path to write rolling log file (disabled by default)",
+    )
+    parser.add_argument(
+        "--log-max-bytes",
+        type=int,
+        default=5 * 1024 * 1024,
+        help="Max size in bytes for a single log file before rolling (default: 5MB)",
+    )
+    parser.add_argument(
+        "--log-backups",
+        type=int,
+        default=5,
+        help="Number of old log files to keep when rolling (default: 5)",
     )
 
     args, compose_args = parser.parse_known_args()
 
-    ports = args.ports or detect_ports(args.compose_dir)
-    if ports:
-        print(f"Monitoring ports: {', '.join(str(p) for p in ports)}")
+    global _LOGGER
+    logger = logging.getLogger("monitor")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    # Clear any existing handlers (in case of multiple runs in same interpreter)
+    logger.handlers = []
+
+    stream_handler = logging.StreamHandler(stream=sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(stream_handler)
+
+    if args.log_file:
+        try:
+            file_handler = RotatingFileHandler(
+                args.log_file,
+                maxBytes=args.log_max_bytes,
+                backupCount=args.log_backups,
+            )
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            logger.addHandler(file_handler)
+            log(f"File logging enabled: {args.log_file} (maxBytes={args.log_max_bytes}, backups={args.log_backups})")
+        except Exception as exc:
+            log(f"Failed to set up file logging to {args.log_file}: {exc}")
+
+    _LOGGER = logger
+
+    ports_all = args.ports or detect_ports(args.compose_dir)
+    if ports_all:
+        print(f"Detected ports: {', '.join(str(p) for p in ports_all)}")
     else:
         print("No ports detected for monitoring")
 
     cmd = ["docker", "compose", "up"] + compose_args
     proc = subprocess.Popen(cmd, cwd=args.compose_dir)
 
+    # Wait for containers to come up, then classify ports by HTTP(S)
+    if args.startup_wait > 0:
+        time.sleep(args.startup_wait)
+
+    ports, scheme_map = classify_ports_http(ports_all, args.ports, startup_probe_seconds=30.0)
+    if ports:
+        pretty = ", ".join(f"{p}({scheme_map.get(p,'http')})" for p in ports)
+        print(f"Monitoring HTTP(S) ports: {pretty}")
+    else:
+        print("No HTTP(S) ports to monitor after classification")
+
+    health_url = None
+    if args.health:
+        health_url = build_health_url(ports, args.health)
+        print(f"Health check URL (initial): {health_url}")
+
+    # After classification, if health was a path (no scheme), rebuild with detected scheme
+    if args.health and health_url and "://" not in health_url:
+        first = ports[0] if ports else ports_all[0]
+        scheme = scheme_map.get(first, "http")
+        path = args.health if args.health.startswith("/") else f"/{args.health}"
+        health_url = f"{scheme}://localhost:{first}{path}"
+        print(f"Health check URL (updated): {health_url}")
+
+    consecutive_failures = 0
+    last_restart_ts = 0.0
+
     status: Dict[int, bool] = {}
     try:
         while proc.poll() is None:
             if ports:
-                check_ports(ports, status)
+                check_ports(ports, status, scheme_map)
+            unhealthy = False
+            if health_url:
+                healthy = check_url(health_url)
+                print(f"Health check ({health_url}): {'OK' if healthy else 'FAIL'}")
+                unhealthy = not healthy
+            else:
+                # Fallback: consider unhealthy if none of the monitored ports are reporting OK
+                if ports:
+                    port_ok = any(status.get(p) for p in ports)
+                    unhealthy = not port_ok
+                    if unhealthy:
+                        print("No monitored HTTP(S) ports are healthy")
+
+            if unhealthy:
+                consecutive_failures += 1
+                print(f"Unhealthy count: {consecutive_failures}/{args.restart_threshold}")
+                if consecutive_failures >= args.restart_threshold:
+                    now = time.time()
+                    if now - last_restart_ts >= args.restart_cooldown:
+                        print("Threshold reached; initiating restart action...")
+                        # Build the up command we used earlier
+                        up_cmd = ["docker", "compose", "up"] + compose_args
+                        new_proc = perform_restart(args.restart_mode, args.compose_dir, up_cmd, proc)
+                        if new_proc is not None:
+                            proc = new_proc
+                        last_restart_ts = now
+                        consecutive_failures = 0
+                    else:
+                        print("Restart suppressed due to cooldown window")
+            else:
+                if consecutive_failures:
+                    print("Health restored")
+                consecutive_failures = 0
             time.sleep(args.interval)
     except KeyboardInterrupt:
         proc.terminate()
     finally:
         proc.wait()
+
+    print("Shutting down dockers.")
+    perform_shutdown(args.compose_dir)
+    
     return proc.returncode
 
 
