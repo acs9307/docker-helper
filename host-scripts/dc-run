@@ -73,15 +73,15 @@ def check_ports(ports: Iterable[int], status: Dict[int, bool], scheme_map: Dict[
                 response = requests.get(url, timeout=2)
             if response.ok:
                 if status.get(port) is not True:
-                    print(f"Port {port} is up ({scheme.upper()})")
+                    log(f"Port {port} is up ({scheme.upper()})")
                 status[port] = True
             else:
                 if status.get(port) is not False:
-                    print(f"Port {port} returned HTTP {response.status_code}")
+                    log(f"Port {port} returned HTTP {response.status_code}")
                 status[port] = False
         except Exception as exc:  # pylint: disable=broad-except
             if status.get(port) is not False:
-                print(f"Port {port} check failed: {exc}")
+                log(f"Port {port} check failed: {exc}")
             status[port] = False
 
 
@@ -135,7 +135,7 @@ def classify_ports_http(all_ports: List[int], user_ports: List[int], startup_pro
         if p in scheme_map or p in user_set:
             filtered.append(p)
         else:
-            print(f"Filtering out non-HTTP(S) port {p} from automatic polling (not user-specified)")
+            log(f"Filtering out non-HTTP(S) port {p} from automatic polling (not user-specified)")
     # Default any unknown scheme to http for user-specified ports
     for p in filtered:
         if p not in scheme_map:
@@ -168,23 +168,23 @@ def perform_shutdown(compose_dir:str):
         Shutsdown the docker services.
     """
     try:
-        subprocess.run(["docker", "compose", "restart"], cwd=compose_dir, check=True)
+        subprocess.run(["docker", "compose", "down"], cwd=compose_dir, check=True)
     except CalledProcessError as exc:
-        print(f"Failed to shutdown docker services: {exc}")
+        log(f"Failed to shutdown docker services: {exc}")
 
 def perform_restart(mode: str, compose_dir: str, up_cmd: List[str], current_proc: subprocess.Popen | None) -> subprocess.Popen | None:
     """Execute the requested restart behavior.
     Returns a new Popen if a fresh `up` is started (down-up), otherwise None.
     """
     if mode == "none":
-        print("Restart mode is 'none'; skipping restart")
+        log("Restart mode is 'none'; skipping restart")
         return None
 
     if mode == "restart":
         try:
             subprocess.run(["docker", "compose", "restart"], cwd=compose_dir, check=True)
         except CalledProcessError as exc:
-            print(f"Failed to restart docker compose: {exc}")
+            log(f"Failed to restart docker compose: {exc}")
         return None
 
     if mode == "down-up":
@@ -206,7 +206,7 @@ def perform_restart(mode: str, compose_dir: str, up_cmd: List[str], current_proc
             new_proc = subprocess.Popen(up_cmd, cwd=compose_dir)
             return new_proc
         except Exception as exc:
-            print(f"Failed to start docker compose up: {exc}")
+            log(f"Failed to start docker compose up: {exc}")
             return None
 
     return None
@@ -327,14 +327,14 @@ def main() -> int:
     ports, scheme_map = classify_ports_http(ports_all, args.ports, startup_probe_seconds=30.0)
     if ports:
         pretty = ", ".join(f"{p}({scheme_map.get(p,'http')})" for p in ports)
-        print(f"Monitoring HTTP(S) ports: {pretty}")
+        log(f"Monitoring HTTP(S) ports: {pretty}")
     else:
-        print("No HTTP(S) ports to monitor after classification")
+        log("No HTTP(S) ports to monitor after classification")
 
     health_url = None
     if args.health:
         health_url = build_health_url(ports, args.health)
-        print(f"Health check URL (initial): {health_url}")
+        log(f"Health check URL (initial): {health_url}")
 
     # After classification, if health was a path (no scheme), rebuild with detected scheme
     if args.health and health_url and "://" not in health_url:
@@ -342,7 +342,7 @@ def main() -> int:
         scheme = scheme_map.get(first, "http")
         path = args.health if args.health.startswith("/") else f"/{args.health}"
         health_url = f"{scheme}://localhost:{first}{path}"
-        print(f"Health check URL (updated): {health_url}")
+        log(f"Health check URL (updated): {health_url}")
 
     consecutive_failures = 0
     last_restart_ts = 0.0
@@ -355,7 +355,7 @@ def main() -> int:
             unhealthy = False
             if health_url:
                 healthy = check_url(health_url)
-                print(f"Health check ({health_url}): {'OK' if healthy else 'FAIL'}")
+                log(f"Health check ({health_url}): {'OK' if healthy else 'FAIL'}")
                 unhealthy = not healthy
             else:
                 # Fallback: consider unhealthy if none of the monitored ports are reporting OK
@@ -363,15 +363,15 @@ def main() -> int:
                     port_ok = any(status.get(p) for p in ports)
                     unhealthy = not port_ok
                     if unhealthy:
-                        print("No monitored HTTP(S) ports are healthy")
+                        log("No monitored HTTP(S) ports are healthy")
 
             if unhealthy:
                 consecutive_failures += 1
-                print(f"Unhealthy count: {consecutive_failures}/{args.restart_threshold}")
+                log(f"Unhealthy count: {consecutive_failures}/{args.restart_threshold}")
                 if consecutive_failures >= args.restart_threshold:
                     now = time.time()
                     if now - last_restart_ts >= args.restart_cooldown:
-                        print("Threshold reached; initiating restart action...")
+                        log("Threshold reached; initiating restart action...")
                         # Build the up command we used earlier
                         up_cmd = ["docker", "compose", "up"] + compose_args
                         new_proc = perform_restart(args.restart_mode, args.compose_dir, up_cmd, proc)
@@ -380,10 +380,10 @@ def main() -> int:
                         last_restart_ts = now
                         consecutive_failures = 0
                     else:
-                        print("Restart suppressed due to cooldown window")
+                        log("Restart suppressed due to cooldown window")
             else:
                 if consecutive_failures:
-                    print("Health restored")
+                    log("Health restored")
                 consecutive_failures = 0
             time.sleep(args.interval)
     except KeyboardInterrupt:
