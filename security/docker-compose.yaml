@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  image-scanner:
+    build:
+      context: .
+    environment:
+      - SCAN_INTERVAL_SECONDS=${SCAN_INTERVAL_SECONDS:-86400}
+      - TRIVY_SEVERITY=${TRIVY_SEVERITY:-HIGH,CRITICAL}
+      - TRIVY_EXTRA_ARGS=${TRIVY_EXTRA_ARGS:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-scanner@localhost}
+      - SMTP_TO=${SMTP_TO:-}
+      - SMTP_TLS=${SMTP_TLS:-true}
+      - SMTP_STARTTLS=${SMTP_STARTTLS:-true}
+      - SMTP_SUBJECT_PREFIX=${SMTP_SUBJECT_PREFIX:-[Image Scanner]}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./logs:/var/log/security-scans
+      - ./cache:/trivy-cache
+      - ./secrets:/run/secrets:ro
+    restart: unless-stopped
