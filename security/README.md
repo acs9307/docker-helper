@@ -9,6 +9,8 @@ Containerized scanner that audits all host Docker images for vulnerabilities usi
 ## Build
 ```sh
 docker compose -f security/docker-compose.yaml build
+# To pin/override Trivy version (defaults to 0.57.1 in Dockerfile):
+# docker compose -f security/docker-compose.yaml build --build-arg TRIVY_VERSION=0.57.1
 ```
 
 ## Run (periodic)
