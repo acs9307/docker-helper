@@ -3,3 +3,4 @@ cache/
 *.log
 .env
 secrets/
+snapshots/

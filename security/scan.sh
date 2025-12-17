@@ -7,6 +7,8 @@ SEVERITY="${TRIVY_SEVERITY:-HIGH,CRITICAL}"
 INTERVAL="${SCAN_INTERVAL_SECONDS:-86400}"
 TRIVY_CACHE_DIR="${TRIVY_CACHE_DIR:-/trivy-cache}"
 EXTRA_ARGS="${TRIVY_EXTRA_ARGS:-}"
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-/snapshots}"
+SNAPSHOT_WRITE="${SNAPSHOT_WRITE:-0}"
 SMTP_HOST="${SMTP_HOST:-}"
 SMTP_PORT="${SMTP_PORT:-587}"
 SMTP_USER="${SMTP_USER:-}"
@@ -18,6 +20,7 @@ SMTP_STARTTLS="${SMTP_STARTTLS:-true}"
 SMTP_SUBJECT_PREFIX="${SMTP_SUBJECT_PREFIX:-[Image Scanner]}"
 
 mkdir -p "${LOG_DIR}" "${TRIVY_CACHE_DIR}"
+mkdir -p "${SNAPSHOT_DIR}"
 export TRIVY_CACHE_DIR
 
 from_secret_or_current() {
@@ -53,6 +56,8 @@ mode_once=0
 for arg in "$@"; do
     case "$arg" in
         --once|-1) mode_once=1 ;;
+        --save-snapshot) SNAPSHOT_WRITE=1 ;;
+        --snapshot-dir=*) SNAPSHOT_DIR="${arg#*=}" ;;
     esac
 done
 if [[ "${SCAN_ONCE:-0}" == "1" || "${SCAN_ONCE:-false}" == "true" ]]; then
@@ -69,6 +74,10 @@ to_bool() {
 
 smtp_configured() {
     [[ -n "${SMTP_TO}" && -n "${SMTP_HOST}" ]]
+}
+
+should_write_snapshot() {
+    to_bool "${SNAPSHOT_WRITE:-0}"
 }
 
 ensure_smtp_config() {
@@ -139,6 +148,54 @@ list_images() {
         | sort -u
 }
 
+write_snapshot() {
+    local image="$1"
+    local safe_name="$2"
+    local ids_file="$3"
+    local baseline_file="${SNAPSHOT_DIR}/${safe_name}.json"
+
+    local ids_json="[]"
+    if [[ -s "$ids_file" ]]; then
+        ids_json=$(jq -R . < "$ids_file" | jq -s .)
+    fi
+
+    jq -n \
+        --arg image "$image" \
+        --arg timestamp "$(timestamp)" \
+        --argjson vulnerabilities "${ids_json}" \
+        '{image:$image, timestamp:$timestamp, vulnerabilities:$vulnerabilities}' > "${baseline_file}"
+}
+
+load_baseline_ids() {
+    local safe_name="$1"
+    local baseline_file="${SNAPSHOT_DIR}/${safe_name}.json"
+    local target_file="$2"
+    if [[ -r "${baseline_file}" ]]; then
+        jq -r '.vulnerabilities[]?' "${baseline_file}" | sort -u > "${target_file}"
+    else
+        : > "${target_file}"
+    fi
+}
+
+summarize_counts() {
+    local json_file="$1"
+    jq -r '
+      (.Results // []) | map(.Vulnerabilities // []) | flatten as $v
+      | if ($v|length)==0 then "None"
+        else ($v | map(.Severity) | group_by(.) | map("\(.[0]): \(length)") | join(", "))
+        end
+    ' "${json_file}" || echo "Unknown (parse error)"
+}
+
+severity_counts() {
+    local json_file="$1"
+    jq -r '
+      (.Results // []) | map(.Vulnerabilities // []) | flatten as $v
+      | reduce ["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"][] as $sev
+          ({}; .[$sev] = ($v | map(select(.Severity==$sev)) | length))
+    ' "${json_file}" 2>/dev/null
+}
+
 scan_image() {
     local image="$1"
     local safe_name
@@ -146,26 +203,141 @@ scan_image() {
     local stamp
     stamp="$(timestamp | tr ':' '-')"
     local log_file="${LOG_DIR}/scan-${stamp}--${safe_name}.log"
+    local json_file="${LOG_DIR}/scan-${stamp}--${safe_name}.json"
 
     echo "[$(timestamp)] Scanning ${image} (severity ${SEVERITY})"
-    trivy image --quiet --severity "${SEVERITY}" --exit-code 1 \
-        ${EXTRA_ARGS:+${EXTRA_ARGS}} "${image}" 2>&1 | tee "${log_file}"
-    local status=${PIPESTATUS[0]}
+    trivy image --quiet --severity "${SEVERITY}" --exit-code 1 --format json --output "${json_file}" \
+        ${EXTRA_ARGS:+${EXTRA_ARGS}} "${image}"
+    local status=$?
+
+    if [[ ${status} -gt 1 || ! -s "${json_file}" ]]; then
+        echo "[$(timestamp)] Scan error for ${image} (exit ${status}); no JSON produced" | tee -a "${SUMMARY_LOG}" >&2
+        send_email "Scan error for ${image}" \
+"The scanner encountered an error (exit ${status}) while scanning ${image} at $(timestamp).
+JSON/log may be incomplete: ${json_file}"
+        return
+    fi
+
+    # Extract vulnerability IDs
+    local new_ids_file
+    new_ids_file=$(mktemp)
+    local jq_ids='(.Results // []) | map(.Vulnerabilities // []) | flatten | .[]? | .VulnerabilityID'
+    if ! jq -r "${jq_ids}" "${json_file}" | sort -u > "${new_ids_file}"; then
+        echo "[$(timestamp)] Failed to parse vulnerabilities for ${image}" | tee -a "${SUMMARY_LOG}" >&2
+        send_email "Scan parse error for ${image}" \
+"The scanner could not parse vulnerabilities from ${json_file} at $(timestamp)."
+        rm -f "${new_ids_file}"
+        return
+    fi
+
+    local baseline_ids_file
+    baseline_ids_file=$(mktemp)
+    load_baseline_ids "${safe_name}" "${baseline_ids_file}"
+
+    mapfile -t new_ids < "${new_ids_file}"
+    mapfile -t baseline_ids < "${baseline_ids_file}"
+
+    mapfile -t new_only < <(comm -13 "${baseline_ids_file}" "${new_ids_file}")
+    mapfile -t resolved < <(comm -23 "${baseline_ids_file}" "${new_ids_file}")
+    local new_count=${#new_only[@]}
+    local resolved_count=${#resolved[@]}
+
+    local has_baseline=0
+    if [[ -s "${baseline_ids_file}" || -f "${SNAPSHOT_DIR}/${safe_name}.json" ]]; then
+        has_baseline=1
+    fi
+
+    local vuln_count=${#new_ids[@]}
+    local changed=0
+    if [[ ${has_baseline} -eq 0 ]]; then
+        changed=$((vuln_count > 0 ? 1 : 0))
+    elif [[ ${#new_only[@]} -gt 0 || ${#resolved[@]} -gt 0 ]]; then
+        changed=1
+    fi
+
+    local counts
+    counts=$(summarize_counts "${json_file}")
+
+    local sev_counts_json
+    sev_counts_json=$(severity_counts "${json_file}")
+    local sev_counts_pretty=""
+    if [[ -n "${sev_counts_json}" ]]; then
+        sev_counts_pretty=$(echo "${sev_counts_json}" | jq -r 'to_entries | map("\(.key): \(.value)") | join(", ")')
+    fi
+
+    {
+        echo "Scan time: $(timestamp)"
+        echo "Image: ${image}"
+        echo "Severity filter: ${SEVERITY}"
+        echo "Counts: ${counts}"
+        if [[ -n "${sev_counts_pretty}" ]]; then
+            echo "Counts by severity: ${sev_counts_pretty}"
+        fi
+        if [[ ${has_baseline} -eq 1 ]]; then
+            echo "Baseline: ${SNAPSHOT_DIR}/${safe_name}.json"
+        else
+            echo "Baseline: none"
+        fi
+        if [[ ${#new_only[@]} -gt 0 ]]; then
+            echo "New since baseline: ${#new_only[@]}"
+            printf '  %s\n' "${new_only[@]}"
+        fi
+        if [[ ${#resolved[@]} -gt 0 ]]; then
+            echo "Resolved since baseline: ${#resolved[@]}"
+            printf '  %s\n' "${resolved[@]}"
+        fi
+        echo "JSON report: ${json_file}"
+        echo "Vulnerabilities:"
+        jq -r '(.Results // []) | map(.Vulnerabilities // []) | flatten | .[]? | "\(.VulnerabilityID) \(.PkgName) \(.InstalledVersion) \(.Severity)"' "${json_file}" \
+            | sed 's/^/  /' || echo "  (none)"
+    } > "${log_file}"
 
     if [[ ${status} -eq 0 ]]; then
-        echo "[$(timestamp)] No vulnerabilities found in ${image}" | tee -a "${SUMMARY_LOG}"
+        if [[ ${changed} -eq 1 && ${has_baseline} -eq 1 ]]; then
+            echo "[$(timestamp)] No new vulnerabilities; resolved ${resolved_count} for ${image}; counts: ${counts}${sev_counts_pretty:+ | ${sev_counts_pretty}}; details: ${log_file}" | tee -a "${SUMMARY_LOG}"
+            send_email "Vulnerabilities resolved for ${image}" \
+"Scan time: $(timestamp)
+Image: ${image}
+Counts: ${counts}
+Counts by severity: ${sev_counts_pretty:-n/a}
+New since baseline: ${new_count}
+Resolved since baseline: ${#resolved[@]}
+Report (host-mounted): ${log_file}
+JSON: ${json_file}"
+        else
+            echo "[$(timestamp)] No new vulnerabilities found for ${image}; counts: ${counts}${sev_counts_pretty:+ | ${sev_counts_pretty}}" | tee -a "${SUMMARY_LOG}"
+        fi
     elif [[ ${status} -eq 1 ]]; then
-        echo "[$(timestamp)] Vulnerabilities found in ${image}; details: ${log_file}" | tee -a "${SUMMARY_LOG}"
-        send_email "Vulnerabilities found in ${image}" \
-"A scan detected vulnerabilities in ${image} at $(timestamp).
-Severity filter: ${SEVERITY}
-Log file (host-mounted): ${log_file}"
+        if [[ ${changed} -eq 1 ]]; then
+            if [[ ${new_count} -gt 0 ]]; then
+                echo "[$(timestamp)] New vulnerabilities: ${new_count} for ${image}; counts: ${counts}${sev_counts_pretty:+ | ${sev_counts_pretty}}; details: ${log_file}" | tee -a "${SUMMARY_LOG}"
+            else
+                echo "[$(timestamp)] No new vulnerabilities; resolved ${resolved_count} for ${image}; counts: ${counts}${sev_counts_pretty:+ | ${sev_counts_pretty}}; details: ${log_file}" | tee -a "${SUMMARY_LOG}"
+            fi
+            send_email "Vulnerabilities changed for ${image}" \
+"Scan time: $(timestamp)
+Image: ${image}
+Counts: ${counts}
+Counts by severity: ${sev_counts_pretty:-n/a}
+New since baseline: ${new_count}
+Resolved since baseline: ${resolved_count}
+Report (host-mounted): ${log_file}
+JSON: ${json_file}"
+        else
+            echo "[$(timestamp)] No new vulnerabilities (baseline match) for ${image}; counts: ${counts}${sev_counts_pretty:+ | ${sev_counts_pretty}}; no alert" | tee -a "${SUMMARY_LOG}"
+        fi
     else
         echo "[$(timestamp)] Scan error for ${image} (exit ${status}); see ${log_file}" | tee -a "${SUMMARY_LOG}" >&2
         send_email "Scan error for ${image}" \
 "The scanner encountered an error (exit ${status}) while scanning ${image} at $(timestamp).
 See log file: ${log_file}"
     fi
+
+    if should_write_snapshot; then
+        write_snapshot "${image}" "${safe_name}" "${new_ids_file}"
+    fi
+
+    rm -f "${new_ids_file}" "${baseline_ids_file}"
 }
 
 scan_all() {

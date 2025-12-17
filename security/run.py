@@ -55,6 +55,15 @@ def parse_args() -> argparse.Namespace:
         help="Prefix for alert email subjects (default \"[Image Scanner]\").",
     )
     parser.add_argument(
+        "--snapshot-dir",
+        help="Directory to store vulnerability snapshots (default /snapshots inside container; host-mounted via ./snapshots).",
+    )
+    parser.add_argument(
+        "--save-snapshot",
+        action="store_true",
+        help="After each scan, write/update the snapshot baseline (whitelist current state).",
+    )
+    parser.add_argument(
         "--no-build",
         action="store_true",
         help="Skip docker compose build (default is to build before running).",
@@ -72,7 +81,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensure_dirs() -> None:
-    for dirname in ("logs", "cache"):
+    for dirname in ("logs", "cache", "snapshots"):
         (HERE / dirname).mkdir(parents=True, exist_ok=True)
 
 
@@ -117,6 +126,10 @@ def main() -> int:
         env["TRIVY_SEVERITY"] = args.severity
     if args.extra_trivy_args is not None:
         env["TRIVY_EXTRA_ARGS"] = args.extra_trivy_args
+    if args.snapshot_dir:
+        env["SNAPSHOT_DIR"] = args.snapshot_dir
+    if args.save_snapshot:
+        env["SNAPSHOT_WRITE"] = "1"
     if args.smtp_host:
         env["SMTP_HOST"] = args.smtp_host
     if args.smtp_port is not None:
