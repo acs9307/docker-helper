@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -188,10 +189,13 @@ def send_email(cfg: Config, msmtp_cfg: Optional[Path], subject: str, body: str) 
         return
     message = f"Subject: {cfg.smtp_subject_prefix} {subject}\nFrom: {cfg.smtp_from}\nTo: {cfg.smtp_to}\n\n{body}\n"
     try:
-        subprocess.check_call(
+        proc = subprocess.Popen(
             ["msmtp", "--file", str(msmtp_cfg), "--account=default", cfg.smtp_to],
-            input=message.encode(),
+            stdin=subprocess.PIPE,
         )
+        proc.communicate(input=message.encode())
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args)
     except subprocess.CalledProcessError:
         print(f"[{utc_timestamp()}] Failed to send email notification", file=sys.stderr)
 
@@ -202,7 +206,7 @@ def log_summary(cfg: Config, line: str) -> None:
     print(line)
 
 
-def process_image(image: str, cfg: Config, msmtp_cfg: Optional[Path], save_snapshot: bool) -> None:
+def process_image(image: str, cfg: Config, save_snapshot: bool) -> Dict:
     stamp = utc_timestamp()
     sname = safe_name(image)
     log_file = cfg.log_dir / f"scan-{stamp}--{sname}.log"
@@ -212,8 +216,18 @@ def process_image(image: str, cfg: Config, msmtp_cfg: Optional[Path], save_snaps
     if status > 1 or not json_file.exists() or json_file.stat().st_size == 0:
         line = f"[{utc_timestamp()}] Scan error for {image} (exit {status}); see {json_file}"
         log_summary(cfg, line)
-        send_email(cfg, msmtp_cfg, f"Scan error for {image}", line)
-        return
+        return {
+            "image": image,
+            "status": status,
+            "error": line,
+            "log_file": log_file,
+            "json_file": json_file,
+            "new": 0,
+            "resolved": 0,
+            "changed": False,
+            "counts_total": 0,
+            "counts_pretty": "",
+        }
 
     vulns, sev_counts = extract_vulnerabilities(json_file)
     vuln_ids = sorted({v.get("VulnerabilityID", "") for v in vulns if v.get("VulnerabilityID")})
@@ -258,27 +272,9 @@ def process_image(image: str, cfg: Config, msmtp_cfg: Optional[Path], save_snaps
     # Summary + email
     if status == 0:
         if changed and has_baseline and resolved_ids:
-            msg = (
-                f"[{utc_timestamp()}] No new vulnerabilities; resolved {len(resolved_ids)} for {image}; "
-                f"counts: {counts_total} | {counts_pretty}; details: {log_file}"
-            )
-            log_summary(cfg, msg)
-            send_email(
+            log_summary(
                 cfg,
-                msmtp_cfg,
-                f"Vulnerabilities resolved for {image}",
-                "\n".join(
-                    [
-                        f"Scan time: {stamp}",
-                        f"Image: {image}",
-                        f"Counts: {counts_total}",
-                        f"Counts by severity: {counts_pretty}",
-                        f"New since baseline: {len(new_ids)}",
-                        f"Resolved since baseline: {len(resolved_ids)}",
-                        f"Report (host-mounted): {log_file}",
-                        f"JSON: {json_file}",
-                    ]
-                ),
+                f"[{utc_timestamp()}] No new vulnerabilities; resolved {len(resolved_ids)} for {image}; counts: {counts_total} | {counts_pretty}; details: {log_file}",
             )
         else:
             log_summary(
@@ -291,41 +287,32 @@ def process_image(image: str, cfg: Config, msmtp_cfg: Optional[Path], save_snaps
                 summary = f"New vulnerabilities: {len(new_ids)} for {image}"
             else:
                 summary = f"No new vulnerabilities; resolved {len(resolved_ids)} for {image}"
-            msg = (
-                f"[{utc_timestamp()}] {summary}; counts: {counts_total} | {counts_pretty}; "
-                f"details: {log_file}"
-            )
-            log_summary(cfg, msg)
-            send_email(
-                cfg,
-                msmtp_cfg,
-                f"Vulnerabilities changed for {image}",
-                "\n".join(
-                    [
-                        f"Scan time: {stamp}",
-                        f"Image: {image}",
-                        f"Counts: {counts_total}",
-                        f"Counts by severity: {counts_pretty}",
-                        f"New since baseline: {len(new_ids)}",
-                        f"Resolved since baseline: {len(resolved_ids)}",
-                        f"Report (host-mounted): {log_file}",
-                        f"JSON: {json_file}",
-                    ]
-                ),
-            )
+            log_summary(cfg, f"[{utc_timestamp()}] {summary}; counts: {counts_total} | {counts_pretty}; details: {log_file}")
         else:
             log_summary(
                 cfg,
-                f"[{utc_timestamp()}] No new vulnerabilities (baseline match) for {image}; "
-                f"counts: {counts_total} | {counts_pretty}; no alert",
+                f"[{utc_timestamp()}] No new vulnerabilities (baseline match) for {image}; counts: {counts_total} | {counts_pretty}; no alert",
             )
     else:
         line = f"[{utc_timestamp()}] Scan error for {image} (exit {status}); see {log_file}"
         log_summary(cfg, line)
-        send_email(cfg, msmtp_cfg, f"Scan error for {image}", line)
 
     if save_snapshot:
         write_snapshot(image, baseline_path, vuln_ids)
+
+    return {
+        "image": image,
+        "status": status,
+        "error": None,
+        "log_file": log_file,
+        "json_file": json_file,
+        "new": len(new_ids),
+        "resolved": len(resolved_ids),
+        "changed": changed,
+        "counts_total": counts_total,
+        "counts_pretty": counts_pretty,
+        "baseline": baseline_path if has_baseline else None,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -349,11 +336,48 @@ def main() -> int:
     msmtp_cfg = ensure_msmtp_config(cfg)
 
     while True:
+        run_results: List[Dict] = []
         images = list_images()
         if not images:
             log_summary(cfg, f"[{utc_timestamp()}] No local images to scan")
         for image in images:
-            process_image(image, cfg, msmtp_cfg, save_snapshot)
+            run_results.append(process_image(image, cfg, save_snapshot))
+
+        # Single email per scan cycle
+        if msmtp_cfg and cfg.smtp_to:
+            total_images = len(run_results)
+            total_new = sum(r.get("new", 0) for r in run_results if r)
+            total_resolved = sum(r.get("resolved", 0) for r in run_results if r)
+            errors = [r for r in run_results if r and r.get("status", 0) > 1 or r.get("error")]
+            changed = [r for r in run_results if r and r.get("changed")]
+
+            subject = f"Scan report: {total_images} images; new={total_new}, resolved={total_resolved}, errors={len(errors)}"
+            body_lines = [
+                f"Scan completed at {utc_timestamp()}",
+                f"Images scanned: {total_images}",
+                f"New vulnerabilities: {total_new}",
+                f"Resolved vulnerabilities: {total_resolved}",
+                f"Images with changes: {len(changed)}",
+                f"Errors: {len(errors)}",
+                "",
+            ]
+            for r in run_results:
+                if not r:
+                    continue
+                status = r.get("status", 0)
+                line = f"- {r['image']}: "
+                if status > 1:
+                    line += f"ERROR (see {r['log_file']})"
+                elif r.get("changed"):
+                    if r.get("new", 0) > 0:
+                        line += f"new {r['new']}"
+                    if r.get("resolved", 0) > 0:
+                        line += f"{'; ' if r.get('new') else ''}resolved {r['resolved']}"
+                else:
+                    line += "no new vulnerabilities"
+                line += f" | counts: {r.get('counts_total', 0)} | {r.get('counts_pretty', '')}"
+                body_lines.append(line)
+            send_email(cfg, msmtp_cfg, subject, "\n".join(body_lines))
         if args.once:
             break
         time.sleep(cfg.interval)
