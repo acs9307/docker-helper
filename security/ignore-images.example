@@ -1,0 +1,4 @@
+# List images to skip, one per line. Lines starting with # are comments.
+# Example:
+# alpine:3.18
+# ubuntu:22.04

@@ -46,6 +46,8 @@ class Config:
         self.extra_args = read_setting("TRIVY_EXTRA_ARGS", "")
         self.snapshot_dir = Path(read_setting("SNAPSHOT_DIR", "/snapshots"))
         self.snapshot_write = to_bool(read_setting("SNAPSHOT_WRITE", "0"))
+        self.ignore_file = Path(read_setting("IGNORE_FILE", "/ignore-images.txt"))
+        self.ignore_images_env = [i.strip() for i in read_setting("IGNORE_IMAGES", "").split(",") if i.strip()]
         # SMTP
         self.smtp_host = read_setting("SMTP_HOST", "")
         self.smtp_port = read_setting("SMTP_PORT", "587")
@@ -86,6 +88,18 @@ def list_images() -> List[str]:
         if line:
             images.append(line)
     return sorted(set(images))
+
+
+def load_ignore_list(cfg: Config) -> List[str]:
+    items: List[str] = []
+    if cfg.ignore_file and cfg.ignore_file.exists():
+        for line in cfg.ignore_file.read_text().splitlines():
+            entry = line.split("#", 1)[0].strip()
+            if entry:
+                items.append(entry)
+    elif cfg.ignore_images_env:
+        items.extend(cfg.ignore_images_env)
+    return items
 
 
 def safe_name(image: str) -> str:
@@ -340,7 +354,11 @@ def main() -> int:
         images = list_images()
         if not images:
             log_summary(cfg, f"[{utc_timestamp()}] No local images to scan")
+        ignore_list = load_ignore_list(cfg)
         for image in images:
+            if ignore_list and image in ignore_list:
+                log_summary(cfg, f"[{utc_timestamp()}] Skipping ignored image {image}")
+                continue
             run_results.append(process_image(image, cfg, save_snapshot))
 
         # Single email per scan cycle

@@ -49,6 +49,7 @@ python3 security/run.py --save-snapshot  # write/update snapshot baseline after 
 - Email alerts (optional): set `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`/`SMTP_PASS` (omit for unauthenticated), `SMTP_FROM` (default `scanner@localhost`), `SMTP_TO` (recipient), `SMTP_TLS`/`SMTP_STARTTLS` (`true`/`false`), and `SMTP_SUBJECT_PREFIX`. All can be passed via `run.py` flags.
 - `.env` support: copy `security/.env.example` to `security/.env` and populate values. Run from the `security/` directory or pass `--env-file security/.env` when invoking `docker compose`; `run.py` automatically uses `security/.env` if it exists. Values set via CLI flags override `.env`.
 - Secrets directory: place files named `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`, `SMTP_TLS`, or `SMTP_STARTTLS` into `security/secrets/` (contents are the raw value). The container reads these from `/run/secrets/<NAME>`; password is typically kept here. The directory is volume-mounted read-only.
+- Ignore list: put images to skip (one per line, comments allowed) in `security/ignore-images.txt` (or copy `ignore-images.example`). Mounted at `/ignore-images.txt` by compose. Alternatively set `IGNORE_FILE` to another path or fallback to `IGNORE_IMAGES` (comma-separated) if no file is provided.
 
 ## Outputs
 - Per-image report logs: `security/logs/scan-<timestamp>--<image>.log`

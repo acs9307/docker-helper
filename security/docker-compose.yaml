@@ -23,4 +23,5 @@ services:
       - ./cache:/trivy-cache
       - ./secrets:/run/secrets:ro
       - ./snapshots:/snapshots
+      - ./ignore-images.txt:/ignore-images.txt:ro
     restart: unless-stopped
