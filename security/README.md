@@ -45,7 +45,7 @@ python3 security/run.py --once --image alpine:3.20  # scan only a specific image
 - `SCAN_INTERVAL_SECONDS` (default `86400`): interval between scans in daemon mode (set via env or `run.py --interval`).
 - `TRIVY_SEVERITY` (default `HIGH,CRITICAL`): comma list passed to `trivy image --severity`.
 - `SCAN_ONCE=1` can force one-shot even when started via `up`; `run.py --once` also works.
-- `TRIVY_EXTRA_ARGS` allows extra flags (e.g., `--ignore-unfixed`, `--timeout 5m`); set via env or `run.py --extra-trivy-args`.
+- `TRIVY_EXTRA_ARGS` allows extra flags (e.g., `--ignore-unfixed`, `--timeout 15m`). Trivy’s default timeout is 5m; for large images (e.g., GitLab), increase it via `.env` or `run.py --extra-trivy-args "--timeout 15m"`.
 - Snapshots/whitelisting: set `SNAPSHOT_WRITE=1` (or `run.py --save-snapshot`) to write/update baselines in `security/snapshots/`. Alerts are only emailed when vulnerability sets change vs. the snapshot; unchanged findings are suppressed. `SNAPSHOT_DIR` controls location (default `/snapshots`).
 - Email alerts (optional): set `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`/`SMTP_PASS` (omit for unauthenticated), `SMTP_FROM` (default `scanner@localhost`), `SMTP_TO` (recipient), `SMTP_TLS`/`SMTP_STARTTLS` (`true`/`false`), and `SMTP_SUBJECT_PREFIX`. All can be passed via `run.py` flags.
 - Limiting scope: set `SCAN_IMAGES` in `.env` (comma-separated) or use `run.py --image <name>` (repeatable) to scan only specific images.
