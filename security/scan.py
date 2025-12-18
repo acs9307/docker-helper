@@ -93,11 +93,15 @@ def list_images() -> List[str]:
 
 def load_ignore_list(cfg: Config) -> List[str]:
     items: List[str] = []
-    if cfg.ignore_file and cfg.ignore_file.exists():
-        for line in cfg.ignore_file.read_text().splitlines():
-            entry = line.split("#", 1)[0].strip()
-            if entry:
-                items.append(entry)
+    if cfg.ignore_file:
+        try:
+            if cfg.ignore_file.is_file():
+                for line in cfg.ignore_file.read_text().splitlines():
+                    entry = line.split("#", 1)[0].strip()
+                    if entry:
+                        items.append(entry)
+        except Exception:
+            pass
     elif cfg.ignore_images_env:
         items.extend(cfg.ignore_images_env)
     return items

@@ -9,6 +9,7 @@ services:
       - SNAPSHOT_DIR=${SNAPSHOT_DIR:-/snapshots}
       - SNAPSHOT_WRITE=${SNAPSHOT_WRITE:-0}
       - SCAN_IMAGES=${SCAN_IMAGES:-}
+      - IGNORE_FILE=${IGNORE_FILE:-/ignore-images.txt}
       - SMTP_HOST=${SMTP_HOST:-}
       - SMTP_PORT=${SMTP_PORT:-587}
       - SMTP_USER=${SMTP_USER:-}
