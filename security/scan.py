@@ -46,6 +46,7 @@ class Config:
         self.extra_args = read_setting("TRIVY_EXTRA_ARGS", "")
         self.snapshot_dir = Path(read_setting("SNAPSHOT_DIR", "/snapshots"))
         self.snapshot_write = to_bool(read_setting("SNAPSHOT_WRITE", "0"))
+        self.scan_images_env = [i.strip() for i in read_setting("SCAN_IMAGES", "").split(",") if i.strip()]
         self.ignore_file = Path(read_setting("IGNORE_FILE", "/ignore-images.txt"))
         self.ignore_images_env = [i.strip() for i in read_setting("IGNORE_IMAGES", "").split(",") if i.strip()]
         # SMTP
@@ -334,6 +335,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", "-1", action="store_true", help="Run a single pass and exit.")
     parser.add_argument("--save-snapshot", action="store_true", help="Write/update baseline snapshots after scan.")
     parser.add_argument("--snapshot-dir", help="Override snapshot directory (defaults to $SNAPSHOT_DIR or /snapshots).")
+    parser.add_argument(
+        "--image",
+        action="append",
+        dest="images",
+        help="Scan only this image (can be repeated). If omitted, all images are scanned.",
+    )
     return parser.parse_args()
 
 
@@ -351,7 +358,13 @@ def main() -> int:
 
     while True:
         run_results: List[Dict] = []
-        images = list_images()
+        images = []
+        if args.images:
+            images = args.images
+        elif cfg.scan_images_env:
+            images = cfg.scan_images_env
+        else:
+            images = list_images()
         if not images:
             log_summary(cfg, f"[{utc_timestamp()}] No local images to scan")
         ignore_list = load_ignore_list(cfg)

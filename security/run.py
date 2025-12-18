@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         help="After each scan, write/update the snapshot baseline (whitelist current state).",
     )
     parser.add_argument(
+        "--image",
+        action="append",
+        dest="images",
+        help="Scan only this image (can be repeated). If omitted, all images are scanned.",
+    )
+    parser.add_argument(
         "--no-build",
         action="store_true",
         help="Skip docker compose build (default is to build before running).",
@@ -148,6 +154,8 @@ def main() -> int:
         env["SMTP_STARTTLS"] = args.smtp_starttls
     if args.smtp_subject_prefix:
         env["SMTP_SUBJECT_PREFIX"] = args.smtp_subject_prefix
+    if args.images:
+        env["SCAN_IMAGES"] = ",".join(args.images)
 
     if not args.no_build:
         run_command(base_cmd + ["build"], env)
