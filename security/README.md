@@ -1,6 +1,6 @@
 # Image Vulnerability Scanner
 
-Containerized scanner that audits all host Docker images for vulnerabilities using Trivy. It mounts the Docker socket to enumerate images, writes per-image reports to `security/logs/`, and appends run summaries to `security/logs/scan-summary.log`.
+Containerized scanner (Python entrypoint) that audits all host Docker images for vulnerabilities using Trivy. It mounts the Docker socket to enumerate images, writes per-image reports to `security/logs/`, and appends run summaries to `security/logs/scan-summary.log`.
 
 ## Prerequisites
 - Host Docker daemon available and accessible via `/var/run/docker.sock`.
